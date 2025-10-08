@@ -350,7 +350,7 @@ app.post('/api/chat/query', authenticateToken, async (req, res) => {
     const { message, conversationId } = req.body;
 
     const queryEmbedding = await openai.embeddings.create({
-  model: 'text-embedding-3-large',
+  model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
   input: message,
 });
 
