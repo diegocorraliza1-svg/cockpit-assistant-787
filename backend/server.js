@@ -297,9 +297,10 @@ app.post('/api/documents/upload', authenticateToken, multerUpload.single('file')
     const chunks = chunkText(textContent, 1000);
 for (let i = 0; i < chunks.length; i++) {
   const chunkEmbedding = await openai.embeddings.create({
-    model: 'text-embedding-3-large',
-    input: chunks[i],
-  });
+  model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+  input: chunks[i],
+});
+
   const emb = chunkEmbedding.data[0].embedding;
   const embLit = `[${emb.join(',')}]`; // convierte a literal vector
   await pool.query(
