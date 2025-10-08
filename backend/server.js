@@ -50,6 +50,95 @@ if (process.env.DATABASE_URL) {
   console.warn('⚠️  DATABASE_URL no definida; las rutas que usan DB responderán 500.');
 }
 
+// --- INIT DB (crea tablas y admin si no existen) ---
+async function initDb() {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      CREATE EXTENSION IF NOT EXISTS vector;
+
+      CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'pilot',
+        license TEXT,
+        active BOOLEAN NOT NULL DEFAULT true,
+        last_login TIMESTAMP,
+        query_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS documents (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        aircraft_type TEXT NOT NULL,
+        version TEXT,
+        notes TEXT,
+        s3_key TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ready',
+        query_count INTEGER NOT NULL DEFAULT 0,
+        upload_date TIMESTAMP NOT NULL DEFAULT NOW(),
+        uploaded_by BIGINT REFERENCES users(id)
+      );
+      CREATE INDEX IF NOT EXISTS documents_status_idx ON documents(status);
+      CREATE INDEX IF NOT EXISTS documents_querycount_idx ON documents(query_count DESC);
+
+      CREATE TABLE IF NOT EXISTS document_chunks (
+        id BIGSERIAL PRIMARY KEY,
+        document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        embedding vector(3072) NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS document_chunks_embedding_ivfflat
+        ON document_chunks USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
+
+      CREATE TABLE IF NOT EXISTS conversations (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT REFERENCES users(id),
+        title TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS messages (
+        id BIGSERIAL PRIMARY KEY,
+        conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS messages_conversation_idx
+        ON messages(conversation_id, created_at);
+    `);
+
+    // crear admin si no existe
+    const adminEmail = 'admin@local';
+    const { rows } = await pool.query('SELECT id FROM users WHERE email=$1', [adminEmail]);
+    if (rows.length === 0) {
+      const passwordHash = await bcrypt.hash('Admin123!', 10); // cámbiala luego
+      await pool.query(
+        'INSERT INTO users (name,email,password_hash,role,license,active) VALUES ($1,$2,$3,$4,$5,$6)',
+        ['Admin', adminEmail, passwordHash, 'admin', 'ATPL', true]
+      );
+      console.log('✅ Admin creado: admin@local / Admin123! (cámbialo después)');
+    } else {
+      console.log('ℹ️ Admin ya existe');
+    }
+
+    console.log('✅ DB init completa');
+  } catch (e) {
+    console.error('❌ Error initDb:', e);
+  }
+}
+
+// Lanza la inicialización nada más arrancar si hay pool
+initDb();
+
+
 // Middleware para exigir DB en rutas /api/*
 function requireDB(req, res, next) {
   if (!pool) return res.status(500).json({ error: 'DB no configurada' });
