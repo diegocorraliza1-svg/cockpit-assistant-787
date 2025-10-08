@@ -50,13 +50,44 @@ if (process.env.DATABASE_URL) {
   console.warn('⚠️  DATABASE_URL no definida; las rutas que usan DB responderán 500.');
 }
 
-// --- INIT DB (crea tablas y admin si no existen) ---
+/// --- INIT DB (crea tablas y admin si no existen) ---
 async function initDb() {
   if (!pool) return;
   try {
-    await pool.query(`
-      CREATE EXTENSION IF NOT EXISTS vector;
+    // 1) Extensión vector
+    await pool.query(`CREATE EXTENSION IF NOT EXISTS vector;`);
 
+    // 2) Si existe document_chunks con otra dimensión, intentamos ajustar a 1536.
+    //    Si no se puede y la tabla está vacía, la recreamos.
+    const { rows: existsRows } = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'document_chunks'
+      ) AS exists;
+    `);
+
+    if (existsRows[0].exists) {
+      try {
+        // Si la columna existe, probamos a cambiar a 1536
+        await pool.query(`ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector(1536);`);
+        console.log('ℹ️  Ajustada columna embedding a vector(1536)');
+      } catch (e) {
+        console.log('ℹ️  No se pudo ALTER a vector(1536). Intento de recreación si está vacía…', e.message);
+        const { rows: cntRows } = await pool.query(`SELECT COUNT(*)::int AS cnt FROM document_chunks;`);
+        if (cntRows[0].cnt === 0) {
+          await pool.query(`
+            DROP INDEX IF EXISTS document_chunks_embedding_ivfflat;
+            DROP TABLE IF EXISTS document_chunks;
+          `);
+          console.log('ℹ️  Tabla document_chunks vacía — recreando con vector(1536)');
+        } else {
+          console.log('⚠️  document_chunks tiene datos con otra dimensión. Te ayudo a migrarlo si lo quieres.');
+        }
+      }
+    }
+
+    // 3) Resto de tablas (idempotentes) con embedding 1536
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGSERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -87,35 +118,23 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS documents_status_idx ON documents(status);
       CREATE INDEX IF NOT EXISTS documents_querycount_idx ON documents(query_count DESC);
 
+      -- 1536 dims (compatibles con Neon + ivfflat)
       CREATE TABLE IF NOT EXISTS document_chunks (
         id BIGSERIAL PRIMARY KEY,
         document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
         chunk_index INTEGER NOT NULL,
         content TEXT NOT NULL,
-        embedding vector(3072) NOT NULL
+        embedding vector(1536) NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS document_chunks_embedding_ivfflat
-        ON document_chunks USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
-
-      CREATE TABLE IF NOT EXISTS conversations (
-        id BIGSERIAL PRIMARY KEY,
-        user_id BIGINT REFERENCES users(id),
-        title TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS messages (
-        id BIGSERIAL PRIMARY KEY,
-        conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS messages_conversation_idx
-        ON messages(conversation_id, created_at);
     `);
 
-    // crear admin si no existe
+    // 4) (Re)crear índice ivfflat (siempre seguro)
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS document_chunks_embedding_ivfflat
+        ON document_chunks USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
+    `);
+
+    // 5) Crear admin si no existe
     const adminEmail = 'admin@local';
     const { rows } = await pool.query('SELECT id FROM users WHERE email=$1', [adminEmail]);
     if (rows.length === 0) {
@@ -126,7 +145,7 @@ async function initDb() {
       );
       console.log('✅ Admin creado: admin@local / Admin123! (cámbialo después)');
     } else {
-      console.log('ℹ️ Admin ya existe');
+      console.log('ℹ️  Admin ya existe');
     }
 
     console.log('✅ DB init completa');
