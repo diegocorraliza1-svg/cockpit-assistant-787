@@ -295,16 +295,18 @@ app.post('/api/documents/upload', authenticateToken, multerUpload.single('file')
     );
 
     const chunks = chunkText(textContent, 1000);
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkEmbedding = await openai.embeddings.create({
-        model: 'text-embedding-3-large',
-        input: chunks[i],
-      });
-      await pool.query(
-        'INSERT INTO document_chunks (document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4)',
-        [result.rows[0].id, i, chunks[i], JSON.stringify(chunkEmbedding.data[0].embedding)]
-      );
-    }
+for (let i = 0; i < chunks.length; i++) {
+  const chunkEmbedding = await openai.embeddings.create({
+    model: 'text-embedding-3-large',
+    input: chunks[i],
+  });
+  const emb = chunkEmbedding.data[0].embedding;
+  const embLit = `[${emb.join(',')}]`; // convierte a literal vector
+  await pool.query(
+    'INSERT INTO document_chunks (document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4::vector)',
+    [result.rows[0].id, i, chunks[i], embLit]
+  );
+}
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -347,19 +349,22 @@ app.post('/api/chat/query', authenticateToken, async (req, res) => {
     const { message, conversationId } = req.body;
 
     const queryEmbedding = await openai.embeddings.create({
-      model: 'text-embedding-3-large',
-      input: message,
-    });
+  model: 'text-embedding-3-large',
+  input: message,
+});
 
-    const relevantChunks = await pool.query(
-      `SELECT dc.content, d.name, d.type, d.aircraft_type, d.id as doc_id
-       FROM document_chunks dc
-       JOIN documents d ON dc.document_id = d.id
-       WHERE d.status = 'ready'
-       ORDER BY dc.embedding <-> $1::vector
-       LIMIT 5`,
-      [JSON.stringify(queryEmbedding.data[0].embedding)]
-    );
+const q = queryEmbedding.data[0].embedding;
+const qlit = `[${q.join(',')}]`;
+
+const relevantChunks = await pool.query(
+  `SELECT dc.content, d.name, d.type, d.aircraft_type, d.id as doc_id
+   FROM document_chunks dc
+   JOIN documents d ON dc.document_id = d.id
+   WHERE d.status = 'ready'
+   ORDER BY dc.embedding <-> $1::vector
+   LIMIT 5`,
+  [qlit]
+);
 
     const context = relevantChunks.rows
       .map((chunk) => `[${chunk.name} - ${chunk.type}]\n${chunk.content}`)
